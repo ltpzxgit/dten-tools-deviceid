@@ -4,44 +4,37 @@ import re
 
 st.set_page_config(page_title="DeviceID Report Generator", layout="wide")
 
-st.title("📊 DeviceID Report (เหมือน History File)")
+st.title("📊 DeviceID Report Generator (Stable Version)")
 
 # =========================
 # REGEX
 # =========================
 REQ_ID_REGEX = r'Request ID:\s*([0-9a-fA-F\-]{36})'
 DEVICE_REGEX = r'deviceId[=:]\s*"?([A-Za-z0-9\-]+)"?'
-DT_REGEX = r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
+DT_REGEX = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
 
 
-def extract_request_id(text):
+def extract(pattern, text):
     if pd.isna(text):
         return None
-    m = re.search(REQ_ID_REGEX, text)
+    m = re.search(pattern, str(text))
     return m.group(1) if m else None
 
 
-def extract_device(text):
+def extract_dt(text):
     if pd.isna(text):
         return None
-    m = re.search(DEVICE_REGEX, text)
-    return m.group(1) if m else None
-
-
-def extract_datetime(text):
-    if pd.isna(text):
-        return None
-    m = re.search(DT_REGEX, text)
+    m = re.search(DT_REGEX, str(text))
     return m.group(0) if m else None
 
 
 def extract_result(msg):
     if pd.isna(msg):
         return "-"
-    msg_lower = msg.lower()
-    if "success" in msg_lower:
+    msg = str(msg).lower()
+    if "success" in msg:
         return "Process completed successfully"
-    elif "error" in msg_lower or "fail" in msg_lower:
+    elif "error" in msg or "fail" in msg:
         return "Error"
     return "-"
 
@@ -50,13 +43,26 @@ def extract_result(msg):
 # PROCESS LOG
 # =========================
 def process_log(df, log_type, service):
-    df["RequestID"] = df["@message"].apply(extract_request_id)
-    df["DeviceID"] = df["@message"].apply(extract_device)
-    df["Datetime"] = df["@message"].apply(extract_datetime)
+
+    # detect message column
+    msg_col = None
+    for col in df.columns:
+        if "@message" in col.lower() or "message" in col.lower():
+            msg_col = col
+            break
+
+    if not msg_col:
+        st.error(f"❌ ไม่เจอ message column ใน {service}")
+        st.write(df.columns)
+        st.stop()
+
+    df["RequestID"] = df[msg_col].apply(lambda x: extract(REQ_ID_REGEX, x))
+    df["DeviceID"] = df[msg_col].apply(lambda x: extract(DEVICE_REGEX, x))
+    df["Datetime"] = df[msg_col].apply(extract_dt)
     df["Service"] = service
 
-    df = df[["RequestID", "DeviceID", "Datetime", "@message", "Service"]]
-    df = df.rename(columns={"@message": log_type})
+    df = df[["RequestID", "DeviceID", "Datetime", msg_col, "Service"]]
+    df = df.rename(columns={msg_col: log_type})
 
     return df
 
@@ -65,7 +71,7 @@ def process_log(df, log_type, service):
 # UI
 # =========================
 uploaded_files = st.file_uploader(
-    "📥 Upload 8 CSV files",
+    "📥 Upload CSV (8 files)",
     type=["csv"],
     accept_multiple_files=True
 )
@@ -100,22 +106,34 @@ if uploaded_files:
     df_res = pd.concat(res_list, ignore_index=True)
 
     # =========================
-    # MERGE REQUEST + RESPONSE
+    # MERGE
     # =========================
     df_all = pd.merge(
         df_req,
         df_res,
         on=["RequestID", "Service"],
-        how="outer",
-        suffixes=("_req", "_res")
+        how="outer"
     )
 
+    # combine message
     df_all["Message"] = df_all["Request"].combine_first(df_all["Response"])
     df_all["Result"] = df_all["Message"].apply(extract_result)
     df_all["HasLog"] = "Yes"
 
     # =========================
-    # PIVOT YES/NO
+    # CLEAN (กัน KeyError)
+    # =========================
+    df_all = df_all.dropna(subset=["RequestID", "DeviceID"])
+
+    if df_all.empty:
+        st.error("❌ ไม่มีข้อมูลหลัง parse → regex อาจไม่ match")
+        st.write(df_all.head())
+        st.stop()
+
+    st.write("🔍 Debug preview", df_all.head())
+
+    # =========================
+    # PIVOT FLAG
     # =========================
     df_flag = df_all.pivot_table(
         index=["RequestID", "DeviceID"],
@@ -140,7 +158,7 @@ if uploaded_files:
     df_final = pd.merge(df_flag, df_result, on=["RequestID", "DeviceID"], how="left")
 
     # =========================
-    # RENAME COLUMN (ตามรูป)
+    # RENAME
     # =========================
     df_final = df_final.rename(columns={
         "RequestID": "Request ID",
@@ -158,19 +176,16 @@ if uploaded_files:
     })
 
     # =========================
-    # ADD FIXED COLUMN
+    # ADD COLUMN
     # =========================
     df_final.insert(0, "No.", range(1, len(df_final)+1))
     df_final["ProStatus"] = "PROD"
     df_final["Carrier"] = "TRUE"
 
-    # =========================
-    # FILL NULL
-    # =========================
     df_final = df_final.fillna("-")
 
     # =========================
-    # ORDER COLUMN
+    # ORDER
     # =========================
     df_final = df_final[[
         "No.",
@@ -188,12 +203,12 @@ if uploaded_files:
         "ProvisioningResponder received from AIS"
     ]]
 
-    st.success("✅ ได้ Report แบบเดียวกับ History แล้ว")
+    st.success("✅ สำเร็จแล้ว (โครงเหมือน history)")
 
     st.dataframe(df_final, use_container_width=True)
 
     # =========================
-    # EXPORT EXCEL
+    # EXPORT
     # =========================
     output_file = "device_history.xlsx"
 
@@ -211,15 +226,6 @@ if uploaded_files:
 
         worksheet.freeze_panes(1, 0)
         worksheet.autofilter("A1:M1")
-
-        header_format = workbook.add_format({
-            "bold": True,
-            "bg_color": "#FFF2CC",
-            "border": 1
-        })
-
-        for col_num, value in enumerate(df_final.columns.values):
-            worksheet.write(0, col_num, value, header_format)
 
     with open(output_file, "rb") as f:
         st.download_button(
