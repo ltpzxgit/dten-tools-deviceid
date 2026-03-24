@@ -4,28 +4,34 @@ import re
 
 st.set_page_config(page_title="DeviceID Report Generator", layout="wide")
 
-st.title("📊 DeviceID Report Generator (Stable Version)")
+st.title("📊 DeviceID Report Generator (Ultimate Stable)")
 
 # =========================
-# REGEX
+# REGEX (Flexible มากขึ้น)
 # =========================
-REQ_ID_REGEX = r'Request ID:\s*([0-9a-fA-F\-]{36})'
-DEVICE_REGEX = r'deviceId[=:]\s*"?([A-Za-z0-9\-]+)"?'
+REQ_ID_REGEX = r'(?:Request ID|RequestId|reqId|request-id)[=: ]+([0-9a-fA-F\-]{10,})'
+DEVICE_REGEX = r'(?:deviceId|device_id|device-id)[=: ]+"?([A-Za-z0-9\-]+)"?'
 DT_REGEX = r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
 
 
 def extract(pattern, text):
     if pd.isna(text):
         return None
-    m = re.search(pattern, str(text))
-    return m.group(1) if m else None
+    try:
+        m = re.search(pattern, str(text), re.IGNORECASE)
+        return m.group(1) if m else None
+    except:
+        return None
 
 
 def extract_dt(text):
     if pd.isna(text):
         return None
-    m = re.search(DT_REGEX, str(text))
-    return m.group(0) if m else None
+    try:
+        m = re.search(DT_REGEX, str(text))
+        return m.group(0) if m else None
+    except:
+        return None
 
 
 def extract_result(msg):
@@ -44,10 +50,10 @@ def extract_result(msg):
 # =========================
 def process_log(df, log_type, service):
 
-    # detect message column
+    # หา message column อัตโนมัติ
     msg_col = None
     for col in df.columns:
-        if "@message" in col.lower() or "message" in col.lower():
+        if "message" in col.lower():
             msg_col = col
             break
 
@@ -56,10 +62,17 @@ def process_log(df, log_type, service):
         st.write(df.columns)
         st.stop()
 
+    df = df.copy()
+
     df["RequestID"] = df[msg_col].apply(lambda x: extract(REQ_ID_REGEX, x))
     df["DeviceID"] = df[msg_col].apply(lambda x: extract(DEVICE_REGEX, x))
     df["Datetime"] = df[msg_col].apply(extract_dt)
     df["Service"] = service
+
+    # 🔥 กัน column หาย
+    for col in ["RequestID", "DeviceID", "Datetime", "Service"]:
+        if col not in df.columns:
+            df[col] = None
 
     df = df[["RequestID", "DeviceID", "Datetime", msg_col, "Service"]]
     df = df.rename(columns={msg_col: log_type})
@@ -102,55 +115,78 @@ if uploaded_files:
         elif "response" in name:
             res_list.append(process_log(df, "Response", service))
 
-    df_req = pd.concat(req_list, ignore_index=True)
-    df_res = pd.concat(res_list, ignore_index=True)
+    if not req_list and not res_list:
+        st.error("❌ ไม่มีไฟล์ request/response ที่ถูกต้อง")
+        st.stop()
+
+    df_req = pd.concat(req_list, ignore_index=True) if req_list else pd.DataFrame()
+    df_res = pd.concat(res_list, ignore_index=True) if res_list else pd.DataFrame()
 
     # =========================
     # MERGE
     # =========================
-    df_all = pd.merge(
-        df_req,
-        df_res,
-        on=["RequestID", "Service"],
-        how="outer"
-    )
+    if not df_req.empty and not df_res.empty:
+        df_all = pd.merge(
+            df_req,
+            df_res,
+            on=["RequestID", "Service"],
+            how="outer"
+        )
+    else:
+        df_all = pd.concat([df_req, df_res], ignore_index=True)
+
+    # =========================
+    # SAFETY CHECK
+    # =========================
+    for col in ["RequestID", "DeviceID", "Service"]:
+        if col not in df_all.columns:
+            df_all[col] = None
 
     # combine message
-    df_all["Message"] = df_all["Request"].combine_first(df_all["Response"])
+    df_all["Message"] = df_all.get("Request", None).combine_first(df_all.get("Response", None))
     df_all["Result"] = df_all["Message"].apply(extract_result)
     df_all["HasLog"] = "Yes"
 
     # =========================
-    # CLEAN (กัน KeyError)
+    # CLEAN DATA
     # =========================
-    df_all = df_all.dropna(subset=["RequestID", "DeviceID"])
+    df_all = df_all.dropna(subset=["RequestID", "DeviceID"], how="any")
 
     if df_all.empty:
         st.error("❌ ไม่มีข้อมูลหลัง parse → regex อาจไม่ match")
+        st.write("🔍 ตัวอย่างข้อมูล:")
         st.write(df_all.head())
         st.stop()
 
-    st.write("🔍 Debug preview", df_all.head())
+    st.write("🔍 Debug Preview", df_all.head())
 
     # =========================
     # PIVOT FLAG
     # =========================
-    df_flag = df_all.pivot_table(
-        index=["RequestID", "DeviceID"],
-        columns="Service",
-        values="HasLog",
-        aggfunc="first"
-    ).fillna("No").reset_index()
+    try:
+        df_flag = df_all.pivot_table(
+            index=["RequestID", "DeviceID"],
+            columns="Service",
+            values="HasLog",
+            aggfunc="first"
+        ).fillna("No").reset_index()
+    except Exception as e:
+        st.error(f"❌ Pivot flag error: {e}")
+        st.stop()
 
     # =========================
     # PIVOT RESULT
     # =========================
-    df_result = df_all.pivot_table(
-        index=["RequestID", "DeviceID"],
-        columns="Service",
-        values="Result",
-        aggfunc="first"
-    ).reset_index()
+    try:
+        df_result = df_all.pivot_table(
+            index=["RequestID", "DeviceID"],
+            columns="Service",
+            values="Result",
+            aggfunc="first"
+        ).reset_index()
+    except Exception as e:
+        st.error(f"❌ Pivot result error: {e}")
+        st.stop()
 
     # =========================
     # MERGE
@@ -160,7 +196,7 @@ if uploaded_files:
     # =========================
     # RENAME
     # =========================
-    df_final = df_final.rename(columns={
+    rename_map = {
         "RequestID": "Request ID",
         "DeviceID": "deviceId",
 
@@ -173,7 +209,9 @@ if uploaded_files:
         "TCAP_y": "DTENTCAPLinkage Result",
         "ProvisioningRequester_y": "ProvisioningRequester Result",
         "ProvisioningResponder_y": "ProvisioningResponder Result",
-    })
+    }
+
+    df_final = df_final.rename(columns=rename_map)
 
     # =========================
     # ADD COLUMN
@@ -184,26 +222,7 @@ if uploaded_files:
 
     df_final = df_final.fillna("-")
 
-    # =========================
-    # ORDER
-    # =========================
-    df_final = df_final[[
-        "No.",
-        "Request ID",
-        "deviceId",
-        "ProStatus",
-        "Carrier",
-        "DTENLinkage Result",
-        "DTENLinkage sent to TCAP",
-        "DTENTCAPLinkage Result",
-        "DTENTCAPLinkage sent to AIS",
-        "ProvisioningRequester Result",
-        "ProvisioningRequester sent to AIS",
-        "ProvisioningResponder Result",
-        "ProvisioningResponder received from AIS"
-    ]]
-
-    st.success("✅ สำเร็จแล้ว (โครงเหมือน history)")
+    st.success("✅ Generate สำเร็จแล้ว")
 
     st.dataframe(df_final, use_container_width=True)
 
